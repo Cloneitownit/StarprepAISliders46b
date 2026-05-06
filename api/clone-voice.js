@@ -1,147 +1,155 @@
-// api/clone-voice.js — Singing voice conversion via Replicate RVC
-// WITH TUNABLE SLIDERS - accepts parameters from frontend
+// api/train-voice.js — Train RVC voice model on Replicate (v96)
 //
-// Keys needed: REPLICATE_API_TOKEN
+// v96-supabase — Uses Supabase Storage (FREE!)
+//   ✅ Receives Supabase Storage URL (not base64 — no size limit!)
+//   ✅ Downloads WAV from Supabase, creates ZIP with archiver
+//   ✅ ZIP structure: dataset/starprep/split_0.wav (per Replicate/Gemini docs)
+//   ✅ Uploads to Replicate Files API via Replicate SDK
+//   ✅ Starts training with WEBHOOK so Vercel doesn't time out
+//   ✅ Saves prediction to Supabase for status tracking
+//   ✅ Webhook at /api/webhooks/replicate pings when training done
 
-export const config = { api: { bodyParser: { sizeLimit: '10mb' } }, maxDuration: 60 };
+import Replicate from 'replicate';
+import archiver from 'archiver';
+import { createClient } from '@supabase/supabase-js';
+
+export const config = { api: { bodyParser: true, sizeLimit: '1mb' }, maxDuration: 60 };
+
+const replicate = new Replicate({ auth: process.env.REPLICATE_API_TOKEN });
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
 
 export default async function handler(req, res) {
-  console.log('🔔 clone-voice (with sliders) invoked:', req.method);
-  
+  console.log('🔔 train-voice v96 invoked:', req.method);
+
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  
   if (req.method === 'OPTIONS') return res.status(200).end();
-  
+
   if (req.method === 'GET') {
     return res.status(200).json({
-      status: 'ok', 
-      version: 'with-sliders',
+      status: 'ok', version: 'v96-supabase',
       replicateKey: process.env.REPLICATE_API_TOKEN ? 'set' : 'MISSING',
+      supabaseUrl: process.env.SUPABASE_URL ? 'set' : 'MISSING',
+      supabaseKey: process.env.SUPABASE_ANON_KEY ? 'set' : 'MISSING',
     });
   }
-  
+
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-  
+
   try {
-    const body = req.body || {};
-    const songUrl = body.songUrl || null;
-    const trainedModelUrl = body.trainedModelUrl || null;
-    
-    // TUNABLE PARAMETERS FROM FRONTEND SLIDERS
-    // If not provided, use sensible defaults
-    const pitchShift = typeof body.pitchShift === 'number' ? body.pitchShift : 0;
-    const indexRate = typeof body.indexRate === 'number' ? body.indexRate : 0.75;
-    const rmsMixRate = typeof body.rmsMixRate === 'number' ? body.rmsMixRate : 0.2;
-    const protect = typeof body.protect === 'number' ? body.protect : 0.3;
-    const filterRadius = typeof body.filterRadius === 'number' ? body.filterRadius : 4;
-    
-    console.log('=================================================');
-    console.log('CLONE VOICE — WITH SLIDER CONTROLS');
-    console.log('Song URL:', songUrl ? songUrl.substring(0, 80) : 'NONE');
-    console.log('Trained model URL:', trainedModelUrl ? trainedModelUrl.substring(0, 80) : 'NONE');
-    console.log('--- TUNING SETTINGS ---');
-    console.log('Pitch Shift:', pitchShift, 'semitones');
-    console.log('Index Rate:', indexRate);
-    console.log('RMS Mix Rate:', rmsMixRate);
-    console.log('Protect:', protect);
-    console.log('Filter Radius:', filterRadius);
-    console.log('=================================================');
-    
-    const TOKEN = process.env.REPLICATE_API_TOKEN;
-    if (!TOKEN) {
-      return res.status(500).json({ success: false, error: 'REPLICATE_API_TOKEN not set in Vercel' });
-    }
-    
-    if (!songUrl) {
-      return res.status(400).json({ success: false, error: 'songUrl is required' });
-    }
-    
-    if (!trainedModelUrl) {
-      return res.status(200).json({
-        success: false,
-        needsTraining: true,
-        error: 'No trained voice model found. Please complete voice training first.',
-      });
-    }
-    
-    console.log('🎤 Starting RVC inference with custom tuning...');
-    
-    const startRes = await fetch('https://api.replicate.com/v1/predictions', {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + TOKEN,
-        'Content-Type': 'application/json',
+    var body      = req.body || {};
+    var audioUrl  = body.audioUrl  || null;  // Supabase Storage URL — the WAV file
+    var userId    = body.userId    || 'user_' + Date.now();
+
+    console.log('audioUrl:', audioUrl ? audioUrl.substring(0, 80) : 'NONE');
+    console.log('userId:', userId);
+
+    if (!process.env.REPLICATE_API_TOKEN) return res.status(500).json({ error: 'REPLICATE_API_TOKEN not set' });
+    if (!process.env.SUPABASE_URL)        return res.status(500).json({ error: 'SUPABASE_URL not set' });
+    if (!audioUrl) return res.status(400).json({ error: 'audioUrl is required — upload audio to Supabase first' });
+
+    // ── Step 1: Download WAV from Supabase Storage ─────────────────────────────
+    // Supabase public bucket URLs don't need auth
+    console.log('📥 Downloading WAV from Supabase...');
+    var dlRes = await fetch(audioUrl);
+    if (!dlRes.ok) return res.status(400).json({ error: 'Failed to download audio from Supabase: ' + dlRes.status });
+    var wavArrayBuf = await dlRes.arrayBuffer();
+    var wavBuf = Buffer.from(wavArrayBuf);
+    console.log('✅ WAV downloaded:', wavBuf.length, 'bytes');
+
+    // Verify RIFF WAV header
+    var isWav = wavBuf.length > 4 &&
+      wavBuf[0] === 0x52 && wavBuf[1] === 0x49 &&
+      wavBuf[2] === 0x46 && wavBuf[3] === 0x46;
+    console.log('WAV header:', isWav ? '✅ valid' : '⚠️ not a WAV file');
+
+    // ── Step 2: Create ZIP with correct Replicate structure ───────────────
+    // Per Replicate docs: dataset/<rvc_name>/split_<i>.wav
+    // Gemini confirmed: files MUST be named split_0.wav, split_1.wav, etc.
+    console.log('📦 Creating ZIP: dataset/starprep/split_0.wav ...');
+
+    var zipBuffer = await new Promise(function(resolve, reject) {
+      var chunks = [];
+      var archive = archiver('zip', { zlib: { level: 9 } });
+      archive.on('data', function(chunk) { chunks.push(chunk); });
+      archive.on('end', function() { resolve(Buffer.concat(chunks)); });
+      archive.on('error', function(err) { reject(err); });
+      archive.append(wavBuf, { name: 'dataset/starprep/split_0.wav' });
+      archive.finalize();
+    });
+
+    console.log('✅ ZIP created:', zipBuffer.length, 'bytes');
+
+    // ── Step 3: Upload ZIP to Replicate Files API ─────────────────────────
+    console.log('📤 Uploading ZIP to Replicate Files API...');
+
+    var upload = await replicate.files.create(zipBuffer, {
+      filename: 'starprep_dataset_' + userId + '.zip',
+      contentType: 'application/zip',
+    });
+
+    var datasetZipUrl = upload.urls.get;
+    console.log('✅ Uploaded to Replicate Files:', datasetZipUrl.substring(0, 80));
+
+    // ── Step 4: Start RVC training WITH WEBHOOK ───────────────────────────
+    // Webhook fires when training is done — Vercel won't time out waiting
+    // Replicate calls /api/webhooks/replicate?userId=xxx when complete
+    var appUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL
+      ? 'https://' + process.env.VERCEL_PROJECT_PRODUCTION_URL
+      : process.env.APP_URL || 'https://starprepai46.vercel.app';
+
+    var webhookUrl = appUrl + '/api/webhooks/replicate?userId=' + encodeURIComponent(userId);
+    console.log('🔗 Webhook URL:', webhookUrl);
+    console.log('🚀 Starting RVC training...');
+
+    var prediction = await replicate.predictions.create({
+      version: '920d08bcf911546897a4bf5a5b78cf0b387a79d74d847cc9523ced6603ac1b90',
+      input: {
+        dataset_zip: datasetZipUrl,
+        sample_rate: '48000',
+        version:     'v2',
+        f0method:    'rmvpe_gpu',
+        epoch:       50,
+        batch_size:  '7',
       },
-      body: JSON.stringify({
-        version: '0a9c7c558af4c0f20667c1bd1260ce32a2879944a0b9e44e1398660c077b1550',
-        input: {
-          song_input: songUrl,
-          rvc_model: 'CUSTOM',
-          custom_rvc_model_download_url: trainedModelUrl,
-          custom_rvc_model_download_name: 'custom_voice',
-          
-          // PITCH — from slider
-          pitch_change: 'no-change',
-          pitch_change_all: pitchShift,
-          pitch_detection_algo: 'rmvpe',
-          
-          // TUNING — from sliders
-          index_rate: indexRate,
-          filter_radius: filterRadius,
-          rms_mix_rate: rmsMixRate,
-          protect: protect,
-          
-          output_format: 'mp3',
-          
-          // Volume — unchanged
-          main_vocals_volume_change: 0,
-          backup_vocals_volume_change: 0,
-          instrumental_volume_change: 0,
-          
-          // Minimal reverb
-          reverb_room_size: 0.1,
-          reverb_wetness: 0.05,
-          reverb_dryness: 0.95,
-          reverb_damping: 0.7,
-        },
-      }),
+      webhook:               webhookUrl,
+      webhook_events_filter: ['completed'],
     });
-    
-    const startBody = await startRes.text();
-    console.log('Replicate response:', startRes.status, startBody.substring(0, 300));
-    
-    if (!startRes.ok) {
-      return res.status(200).json({
-        success: false,
-        error: 'RVC inference failed to start: ' + startBody,
-      });
+
+    console.log('✅ Training started! predictionId:', prediction.id, '| status:', prediction.status);
+
+    // ── Step 5: Save to Supabase so frontend can poll status ──────────────
+    var { error: dbErr } = await supabase
+      .from('voice_models')
+      .upsert({
+        user_id:       userId,
+        prediction_id: prediction.id,
+        status:        'training',
+        model_url:     null,
+      }, { onConflict: 'user_id' });
+
+    if (dbErr) {
+      console.warn('⚠️ Supabase insert failed (non-fatal):', dbErr.message);
+    } else {
+      console.log('✅ Saved to Supabase');
     }
-    
-    const prediction = JSON.parse(startBody);
-    console.log('✅ RVC inference started | jobId:', prediction.id, '| status:', prediction.status);
-    
-    if (prediction.status === 'succeeded' && prediction.output) {
-      const out = typeof prediction.output === 'string' ? prediction.output : prediction.output[0];
-      return res.status(200).json({
-        success: true,
-        method: 'replicate-rvc',
-        status: 'succeeded',
-        clonedAudioUrl: out,
-        audioUrl: out,
-      });
-    }
-    
+
     return res.status(200).json({
-      success: true,
-      method: 'replicate-rvc',
-      status: 'started',
-      jobId: prediction.id,
+      success:          true,
+      predictionId:     prediction.id,
+      userId:           userId,
+      status:           'training',
+      message:          'Voice model training started — Replicate will ping webhook when done (~10 min)',
+      estimatedMinutes: 10,
     });
-    
+
   } catch (err) {
-    console.error('❌ clone-voice error:', err);
-    return res.status(500).json({ success: false, error: err.message || 'Unknown error' });
+    console.error('❌ train-voice v96 error:', err);
+    return res.status(500).json({ error: err.message || 'Unknown error in train-voice' });
   }
 }
