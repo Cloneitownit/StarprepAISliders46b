@@ -1,0 +1,22 @@
+{
+  "functions": {
+    "api/train-voice.js": { "maxDuration": 60 },
+    "api/separate-stems.js": { "maxDuration": 60 },
+    "api/clone-voice.js": { "maxDuration": 60 },
+    "api/upload-voice.js": { "maxDuration": 60 },
+    "api/webhooks/replicate.js": { "maxDuration": 60 }
+  },
+  "rewrites": [
+    { "source": "/((?!api/).*)", "destination": "/index.html" }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "X-Frame-Options", "value": "DENY" },
+        { "key": "X-XSS-Protection", "value": "1; mode=block" }
+      ]
+    }
+  ]
+}
