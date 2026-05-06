@@ -1,16 +1,16 @@
 // api/upload-voice.js — Upload voice audio to Supabase Storage
 //
-// Receives raw WAV bytes from frontend, uploads to Supabase Storage bucket "audio"
-// Returns the public URL for use in training
+// Updated to work with new Supabase publishable key format (sb_publishable_...)
+// Uses apikey header instead of Bearer token
 
 export const config = {
   api: {
-    bodyParser: false,  // We handle raw binary data
+    bodyParser: false,
   },
 };
 
 export default async function handler(req, res) {
-  console.log('🎤 upload-voice.js invoked');
+  console.log('🎤 upload-voice.js invoked (v2 - new key format)');
 
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -38,6 +38,8 @@ export default async function handler(req, res) {
     });
   }
 
+  console.log('🔑 Key format:', supabaseKey.substring(0, 15) + '...');
+
   try {
     // Collect raw body chunks
     const chunks = [];
@@ -60,9 +62,11 @@ export default async function handler(req, res) {
     const uploadUrl = `${supabaseUrl}/storage/v1/object/audio/${filename}`;
     console.log(`📤 Uploading to: ${uploadUrl}`);
 
+    // Use apikey header for new sb_publishable_ format
     const uploadResponse = await fetch(uploadUrl, {
       method: 'POST',
       headers: {
+        'apikey': supabaseKey,
         'Authorization': `Bearer ${supabaseKey}`,
         'Content-Type': 'audio/wav',
         'x-upsert': 'true',
