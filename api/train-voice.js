@@ -1,8 +1,8 @@
 // api/train-voice.js — Train RVC voice model on Replicate (v96)
 //
-// v96 — Fixed ZIP file naming to match Replicate's exact requirements
-//   ✅ Receives Vercel Blob URL (not base64 — no size limit!)
-//   ✅ Downloads WAV from Blob, creates ZIP with archiver
+// v96-supabase — Uses Supabase Storage (FREE!)
+//   ✅ Receives Supabase Storage URL (not base64 — no size limit!)
+//   ✅ Downloads WAV from Supabase, creates ZIP with archiver
 //   ✅ ZIP structure: dataset/starprep/split_0.wav (per Replicate/Gemini docs)
 //   ✅ Uploads to Replicate Files API via Replicate SDK
 //   ✅ Starts training with WEBHOOK so Vercel doesn't time out
@@ -32,10 +32,10 @@ export default async function handler(req, res) {
 
   if (req.method === 'GET') {
     return res.status(200).json({
-      status: 'ok', version: 'v96',
+      status: 'ok', version: 'v96-supabase',
       replicateKey: process.env.REPLICATE_API_TOKEN ? 'set' : 'MISSING',
       supabaseUrl: process.env.SUPABASE_URL ? 'set' : 'MISSING',
-      blobToken: process.env.BLOB_READ_WRITE_TOKEN ? 'set' : 'MISSING',
+      supabaseKey: process.env.SUPABASE_ANON_KEY ? 'set' : 'MISSING',
     });
   }
 
@@ -43,7 +43,7 @@ export default async function handler(req, res) {
 
   try {
     var body      = req.body || {};
-    var audioUrl  = body.audioUrl  || null;  // Vercel Blob URL — the WAV file
+    var audioUrl  = body.audioUrl  || null;  // Supabase Storage URL — the WAV file
     var userId    = body.userId    || 'user_' + Date.now();
 
     console.log('audioUrl:', audioUrl ? audioUrl.substring(0, 80) : 'NONE');
@@ -51,13 +51,13 @@ export default async function handler(req, res) {
 
     if (!process.env.REPLICATE_API_TOKEN) return res.status(500).json({ error: 'REPLICATE_API_TOKEN not set' });
     if (!process.env.SUPABASE_URL)        return res.status(500).json({ error: 'SUPABASE_URL not set' });
-    if (!audioUrl) return res.status(400).json({ error: 'audioUrl is required — upload audio to Vercel Blob first' });
+    if (!audioUrl) return res.status(400).json({ error: 'audioUrl is required — upload audio to Supabase first' });
 
-    // ── Step 1: Download WAV from Vercel Blob ─────────────────────────────
-    // Vercel Blob public URLs don't need auth, but we include it just in case
-    console.log('📥 Downloading WAV from Vercel Blob...');
+    // ── Step 1: Download WAV from Supabase Storage ─────────────────────────────
+    // Supabase public bucket URLs don't need auth
+    console.log('📥 Downloading WAV from Supabase...');
     var dlRes = await fetch(audioUrl);
-    if (!dlRes.ok) return res.status(400).json({ error: 'Failed to download audio from Blob: ' + dlRes.status });
+    if (!dlRes.ok) return res.status(400).json({ error: 'Failed to download audio from Supabase: ' + dlRes.status });
     var wavArrayBuf = await dlRes.arrayBuffer();
     var wavBuf = Buffer.from(wavArrayBuf);
     console.log('✅ WAV downloaded:', wavBuf.length, 'bytes');
